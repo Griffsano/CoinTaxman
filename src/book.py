@@ -796,9 +796,9 @@ class Book:
                 # sanity check. To prevent errors due to rounding, allow an error
                 # of 1 percent
                 assert total * decimal.Decimal(0.99) <= \
-                    change*price <= total * decimal.Decimal(1.01), \
-                    f"Total value does not seem to be correct in row " + \
-                    "{row} of file {file_path}"
+                    change * price <= total * decimal.Decimal(1.01), \
+                    "Total value does not seem to be correct in row " + \
+                    f"{row} of file {file_path}"
 
                 fee = misc.force_decimal(_fee)
                 assert fee > 0, "Unexpected value for 'Fee' column"
