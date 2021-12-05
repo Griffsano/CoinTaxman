@@ -741,11 +741,90 @@ class Book:
                     file_path,
                 )
 
+    def _read_gate_trades(self, file_path: Path) -> None:
+        platform = "gate"
+
+        operation_mapping = {
+            "Sell": "Sell",
+            "Buy": "Buy",
+        }
+
+        with open(file_path, encoding='utf-16') as f:
+            reader = csv.reader(f, delimiter='\t')
+
+            line = next(reader)
+            assert line == [
+                    "No",
+                    "Time",
+                    "Trade type",
+                    "Pair",
+                    "Price",
+                    "Amount",
+                    "Total",
+                    "Fee",
+                ]
+
+            for current_line in reader:
+                (
+                    _number,
+                    _utc_plus8_time,
+                    operation,
+                    _trade_pair,
+                    _price,
+                    _amount,
+                    _total,
+                    _fee_info,
+                ) = current_line
+
+                row = reader.line_num
+
+                # Gate.io server time is in UTC+8
+                utc_time = misc.parse_iso_timestamp(_utc_plus8_time + "+08:00").astimezone(datetime.timezone.utc)
+
+                # Currently supported operations
+                assert operation in ["Buy", "Sell"], "Unsupported operation"
+                
+                [coin, price_currency] = _trade_pair.split("/")
+                [_fee, fee_currency] = _fee_info.split(" ")
+
+                # sanity checks
+                price = misc.force_decimal(_price)
+                assert price >= 0, "Unexpected value for 'Price' column"
+
+                change = misc.force_decimal(_amount)
+                assert change > 0, "Unexpected value for 'Amount' column"
+
+                total = misc.force_decimal(_total)
+                assert total >= 0, "Unexpected value for 'Total' column"
+                # since the total is available, we can also use it as additional sanity check
+                # to prevent errors due to rounding, allow an error of 1 percent
+                assert total*decimal.Decimal(0.99) <= change*price <= total*decimal.Decimal(1.01), \
+                f"Total value does not seem to be correct in row {row} of file {file_path}"
+
+                fee = misc.force_decimal(_fee)
+                assert fee > 0, "Unexpected value for 'Fee' column"
+
+                self.append_operation(
+                    operation.title(), utc_time, platform, change, coin, row, file_path
+                )
+
+                # Save price in our local database for later
+                self.price_data.set_price_db(platform, coin, price_currency, utc_time, price)
+
+                self.append_operation(
+                    "Fee", utc_time, platform, fee, fee_currency, row, file_path
+                )
+
     def detect_exchange(self, file_path: Path) -> Optional[str]:
         if file_path.suffix == ".csv":
             with open(file_path, encoding="utf8") as f:
                 reader = csv.reader(f)
-                header = next(reader, None)
+                try:
+                    header = next(reader, None)
+                except UnicodeDecodeError:  # try different encoding (for example for exports from Gate.io)
+                    with open(file_path, encoding='utf-16') as f:
+                        reader = csv.reader(f)
+                        header = next(reader, None)
 
             expected_headers = {
                 "binance": [
@@ -827,6 +906,9 @@ class Book:
                     "Disclaimer: All data is without guarantee,"
                     " errors and changes are reserved."
                 ],
+                "gate_trades": [
+                    "No	Time	Trade type	Pair	Price	Amount	Total	Fee"
+                ]
             }
             for exchange, expected in expected_headers.items():
                 if header == expected:
