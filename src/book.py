@@ -744,25 +744,20 @@ class Book:
     def _read_gate_trades(self, file_path: Path) -> None:
         platform = "gate"
 
-        operation_mapping = {
-            "Sell": "Sell",
-            "Buy": "Buy",
-        }
-
         with open(file_path, encoding='utf-16') as f:
             reader = csv.reader(f, delimiter='\t')
 
             line = next(reader)
             assert line == [
-                    "No",
-                    "Time",
-                    "Trade type",
-                    "Pair",
-                    "Price",
-                    "Amount",
-                    "Total",
-                    "Fee",
-                ]
+                "No",
+                "Time",
+                "Trade type",
+                "Pair",
+                "Price",
+                "Amount",
+                "Total",
+                "Fee",
+            ]
 
             for current_line in reader:
                 (
@@ -779,11 +774,12 @@ class Book:
                 row = reader.line_num
 
                 # Gate.io server time is in UTC+8
-                utc_time = misc.parse_iso_timestamp(_utc_plus8_time + "+08:00").astimezone(datetime.timezone.utc)
+                utc_time = misc.parse_iso_timestamp(_utc_plus8_time + "+08:00")
+                utc_time = utc_time.astimezone(datetime.timezone.utc)
 
                 # Currently supported operations
                 assert operation in ["Buy", "Sell"], "Unsupported operation"
-                
+
                 [coin, price_currency] = _trade_pair.split("/")
                 [_fee, fee_currency] = _fee_info.split(" ")
 
@@ -796,10 +792,13 @@ class Book:
 
                 total = misc.force_decimal(_total)
                 assert total >= 0, "Unexpected value for 'Total' column"
-                # since the total is available, we can also use it as additional sanity check
-                # to prevent errors due to rounding, allow an error of 1 percent
-                assert total*decimal.Decimal(0.99) <= change*price <= total*decimal.Decimal(1.01), \
-                f"Total value does not seem to be correct in row {row} of file {file_path}"
+                # Since the total is available, we can also use it as additional
+                # sanity check. To prevent errors due to rounding, allow an error
+                # of 1 percent
+                assert total * decimal.Decimal(0.99) <= \
+                    change*price <= total * decimal.Decimal(1.01), \
+                    f"Total value does not seem to be correct in row " + \
+                    "{row} of file {file_path}"
 
                 fee = misc.force_decimal(_fee)
                 assert fee > 0, "Unexpected value for 'Fee' column"
@@ -809,7 +808,13 @@ class Book:
                 )
 
                 # Save price in our local database for later
-                self.price_data.set_price_db(platform, coin, price_currency, utc_time, price)
+                self.price_data.set_price_db(
+                    platform,
+                    coin,
+                    price_currency,
+                    utc_time,
+                    price,
+                )
 
                 self.append_operation(
                     "Fee", utc_time, platform, fee, fee_currency, row, file_path
@@ -821,7 +826,8 @@ class Book:
                 reader = csv.reader(f)
                 try:
                     header = next(reader, None)
-                except UnicodeDecodeError:  # try different encoding (for example for exports from Gate.io)
+                # try different encoding (for example for exports from Gate.io)
+                except UnicodeDecodeError:
                     with open(file_path, encoding='utf-16') as f:
                         reader = csv.reader(f)
                         header = next(reader, None)
