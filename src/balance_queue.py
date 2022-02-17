@@ -18,12 +18,12 @@ import abc
 import collections
 import dataclasses
 import decimal
-import logging
 from typing import Union
 
+import log_config
 import transaction
 
-log = logging.getLogger(__name__)
+log = log_config.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -66,7 +66,7 @@ class BalanceQueue(abc.ABC):
         """Put a new item in the queue.
 
         Args:
-            item (Union[Operation, BalancedOperation])
+            item (BalancedOperation)
         """
         raise NotImplementedError
 
@@ -156,7 +156,7 @@ class BalanceFIFOQueue(BalanceQueue):
         """Put a new item in the queue.
 
         Args:
-            item (Union[Operation, BalancedOperation])
+            item (BalancedOperation)
         """
         self.queue.append(bop)
 
@@ -182,7 +182,7 @@ class BalanceLIFOQueue(BalanceQueue):
         """Put a new item in the queue.
 
         Args:
-            item (Union[Operation, BalancedOperation])
+            item (BalancedOperation)
         """
         self.queue.append(bop)
 

@@ -19,11 +19,12 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import decimal
-import logging
 import typing
 from pathlib import Path
 
-log = logging.getLogger(__name__)
+import log_config
+
+log = log_config.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -78,7 +79,14 @@ class CoinLendEnd(Operation):
     pass
 
 
-@dataclasses.dataclass
+class Staking(Operation):
+    pass
+
+
+class StakingEnd(Operation):
+    pass
+
+
 class Transaction(Operation):
     pass
 
@@ -119,7 +127,7 @@ class Deposit(Transaction):
     pass
 
 
-class Withdraw(Transaction):
+class Withdrawal(Transaction):
     pass
 
 
@@ -138,4 +146,53 @@ class TaxEvent:
     taxed_gain: decimal.Decimal
     op: Operation
     sell_price: decimal.Decimal = decimal.Decimal()
+    real_gain: decimal.Decimal = decimal.Decimal()
     remark: str = ""
+
+
+gain_operations = [
+    CoinLendEnd,
+    StakingEnd,
+    Buy,
+    CoinLendInterest,
+    StakingInterest,
+    Airdrop,
+    Commission,
+    Deposit,
+]
+loss_operations = [
+    Fee,
+    CoinLend,
+    Staking,
+    Sell,
+    Withdrawal,
+]
+operations_order = gain_operations + loss_operations
+
+
+def sort_operations(
+    operations: list[Operation],
+    keys: typing.Optional[list[str]] = None,
+) -> list[Operation]:
+    """Sort operations by `operations_order` and arbitrary keys/members.
+
+    If the operation type is missing in `operations_order`. The operation
+    will be placed first.
+
+    Args:
+        operations (list[Operation]): Operations to be sorted.
+        keys (list[str], optional): List of operation members which will be considered
+                                    when sorting. Defaults to None.
+
+    Returns:
+        list[Operation]: Sorted operations by `operations_order` and specific keys.
+    """
+
+    def key(op: Operation) -> tuple:
+        try:
+            idx = operations_order.index(type(op))
+        except ValueError:
+            idx = 0
+        return tuple(([getattr(op, key) for key in keys] if keys else []) + [idx])
+
+    return sorted(operations, key=key)
