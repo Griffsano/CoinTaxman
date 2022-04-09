@@ -48,31 +48,33 @@ def xfloat(x: Union[None, str, SupportsFloat]) -> Optional[float]:
     return None if x is None or x == "" else float(x)
 
 
-def xdecimal(x: Union[None, str, int, float]) -> Optional[decimal.Decimal]:
+def xdecimal(
+    x: Union[None, str, int, float, decimal.Decimal]
+) -> Optional[decimal.Decimal]:
     """Convert to decimal, but make sure, that empty values return as None.
 
     Integer and floats are converted to strings first to receive
     "real" Decimal values.
 
     Args:
-        x (Union[None, str, int, float])
+        x (Union[None, str, int, float, decimal.Decimal])
 
     Returns:
         Optional[decimal.Decimal]
     """
     if isinstance(x, (int, float)):
         x = str(x)
-    assert x is None or isinstance(x, str)
+    assert x is None or isinstance(x, str) or isinstance(x, decimal.Decimal)
     return None if x is None or x == "" else decimal.Decimal(x)
 
 
-def force_decimal(x: Union[str, int, float]) -> decimal.Decimal:
+def force_decimal(x: Union[None, str, int, float, decimal.Decimal]) -> decimal.Decimal:
     """Convert to decimal, but make sure, that empty values raise an error.
 
     See `xdecimal` for further informations.
 
     Args:
-        x (Union[None, str, int, float])
+        x (Union[None, str, int, float, decimal.Decimal])
 
     Raises:
         ValueError: The given argument can not be parsed accordingly.
@@ -255,11 +257,13 @@ def get_next_file_path(path: Path, base_filename: str, extension: str) -> Path:
     return file_path
 
 
-def get_current_commit_hash() -> Optional[str]:
+def get_current_commit_hash(default: Optional[str] = None) -> str:
     try:
         output = subprocess.check_output(["git", "rev-parse", "HEAD"])
         commit = output.decode()
         commit = commit.strip()
         return commit
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        if default is None:
+            raise RuntimeError("Unable to determine commit hash") from e
+        return default

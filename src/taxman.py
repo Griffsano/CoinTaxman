@@ -64,6 +64,12 @@ class Taxman:
     def in_tax_year(self, op: transaction.Operation) -> bool:
         return op.utc_time.year == config.TAX_YEAR
 
+    def tax_deadline(self) -> datetime.datetime:
+        return min(
+            datetime.datetime(config.TAX_YEAR, 12, 31, 23, 59, 59),
+            datetime.datetime.now(),
+        ).astimezone()
+
     def _evaluate_taxation_GERMANY(
         self,
         coin: str,
@@ -71,7 +77,9 @@ class Taxman:
     ) -> None:
         balance = self.BalanceType()
 
-        def evaluate_sell(op: transaction.Operation) -> Optional[transaction.TaxEvent]:
+        def evaluate_sell(
+            op: transaction.Operation, force: bool = False
+        ) -> Optional[transaction.TaxEvent]:
             # Remove coins from queue.
             sold_coins, unsold_coins = balance.sell(op.change)
 
@@ -97,7 +105,7 @@ class Taxman:
                 )
                 raise RuntimeError
 
-            if not self.in_tax_year(op):
+            if not self.in_tax_year(op) and not force:
                 # Sell is only taxable in the respective year.
                 return None
 
@@ -125,13 +133,13 @@ class Taxman:
                     and not sc.op.coin == config.FIAT
                 )
                 # Only calculate the gains if necessary.
-                if is_taxable or config.CALCULATE_VIRTUAL_SELL:
+                if is_taxable or config.CALCULATE_UNREALIZED_GAINS:
                     partial_sell_price = (sc.sold / op.change) * sell_price
                     sold_coin_cost = self.price_data.get_cost(sc)
                     gain = partial_sell_price - sold_coin_cost
                     if is_taxable:
                         taxed_gain += gain
-                    if config.CALCULATE_VIRTUAL_SELL:
+                    if config.CALCULATE_UNREALIZED_GAINS:
                         real_gain += gain
             remark = ", ".join(
                 f"{sc.sold} from {sc.op.utc_time} " f"({sc.op.__class__.__name__})"
@@ -285,20 +293,21 @@ class Taxman:
 
         # Calculate the amount of coins which should be left on the platform
         # and evaluate the (taxed) gain, if the coin would be sold right now.
-        if config.CALCULATE_VIRTUAL_SELL and (
+        if config.CALCULATE_UNREALIZED_GAINS and (
             (left_coin := sum(((bop.op.change - bop.sold) for bop in balance.queue)))
-            and self.price_data.get_cost(op)
         ):
             assert isinstance(left_coin, decimal.Decimal)
+            # Calculate unrealized gains for the last time of `TAX_YEAR`.
+            # If we are currently in ´TAX_YEAR` take now.
             virtual_sell = transaction.Sell(
-                datetime.datetime.now().astimezone(),
+                self.tax_deadline(),
                 op.platform,
                 left_coin,
                 coin,
                 -1,
                 Path(""),
             )
-            if tx_ := evaluate_sell(virtual_sell):
+            if tx_ := evaluate_sell(virtual_sell, force=True):
                 self.virtual_tax_events.append(tx_)
 
     def _evaluate_taxation_per_coin(
@@ -319,6 +328,10 @@ class Taxman:
         """Evaluate the taxation using country specific function."""
         log.debug("Starting evaluation...")
 
+        assert all(
+            op.utc_time.year <= config.TAX_YEAR for op in self.book.operations
+        ), "For tax evaluation, no operation should happen after the tax year."
+
         if config.MULTI_DEPOT:
             # Evaluate taxation separated by platforms and coins.
             for _, operations in misc.group_by(
@@ -331,47 +344,57 @@ class Taxman:
 
     def print_evaluation(self) -> None:
         """Print short summary of evaluation to stdout."""
+        eval_str = "Evaluation:\n\n"
+
         # Summarize the tax evaluation.
         if self.tax_events:
-            print()
-            print(f"Your tax evaluation for {config.TAX_YEAR}:")
+            eval_str += f"Your tax evaluation for {config.TAX_YEAR}:\n"
             for taxation_type, tax_events in misc.group_by(
                 self.tax_events, "taxation_type"
             ).items():
                 taxed_gains = sum(tx.taxed_gain for tx in tax_events)
-                print(f"{taxation_type}: {taxed_gains:.2f} {config.FIAT}")
+                eval_str += f"{taxation_type}: {taxed_gains:.2f} {config.FIAT}\n"
         else:
-            print(
+            eval_str += (
                 "Either the evaluation has not run or there are no tax events "
-                f"for {config.TAX_YEAR}."
+                f"for {config.TAX_YEAR}.\n"
             )
 
         # Summarize the virtual sell, if all left over coins would be sold right now.
         if self.virtual_tax_events:
-            assert config.CALCULATE_VIRTUAL_SELL
+            assert config.CALCULATE_UNREALIZED_GAINS
+            latest_operation = max(
+                self.virtual_tax_events, key=lambda tx: tx.op.utc_time
+            )
+            lo_date = latest_operation.op.utc_time.strftime("%d.%m.%y")
+
             invsted = sum(tx.sell_price for tx in self.virtual_tax_events)
             real_gains = sum(tx.real_gain for tx in self.virtual_tax_events)
             taxed_gains = sum(tx.taxed_gain for tx in self.virtual_tax_events)
-            print()
-            print(
-                f"You are currently invested with {invsted:.2f} {config.FIAT}.\n"
-                f"If you would sell everything right now, "
-                f"you would realize {real_gains:.2f} {config.FIAT} gains "
-                f"({taxed_gains:.2f} {config.FIAT} taxed gain)."
+            eval_str += "\n"
+            eval_str += (
+                f"Deadline {config.TAX_YEAR}: {lo_date}\n"
+                f"You were invested with {invsted:.2f} {config.FIAT}.\n"
+                f"If you would have sold everything then, "
+                f"you would have realized {real_gains:.2f} {config.FIAT} gains "
+                f"({taxed_gains:.2f} {config.FIAT} taxed gain).\n"
             )
-            print()
-            print("Your current portfolio should be:")
+
+            eval_str += "\n"
+            eval_str += f"Your portfolio on {lo_date} was:\n"
             for tx in sorted(
                 self.virtual_tax_events,
                 key=lambda tx: tx.sell_price,
                 reverse=True,
             ):
-                print(
+                eval_str += (
                     f"{tx.op.platform}: "
                     f"{tx.op.change:.6f} {tx.op.coin} > "
                     f"{tx.sell_price:.2f} {config.FIAT} "
-                    f"({tx.real_gain:.2f} gain, {tx.taxed_gain:.2f} taxed gain)"
+                    f"({tx.real_gain:.2f} gain, {tx.taxed_gain:.2f} taxed gain)\n"
                 )
+
+        log.info(eval_str)
 
     def export_evaluation_as_csv(self) -> Path:
         """Export detailed summary of all tax events to CSV.
@@ -395,8 +418,8 @@ class Taxman:
             writer.writerow(
                 ["# software", "CoinTaxman <https://github.com/provinzio/CoinTaxman>"]
             )
-            if commit_hash := misc.get_current_commit_hash():
-                writer.writerow(["# commit", commit_hash])
+            commit_hash = misc.get_current_commit_hash(default="undetermined")
+            writer.writerow(["# commit", commit_hash])
             writer.writerow(["# updated", datetime.date.today().strftime("%x")])
 
             header = [

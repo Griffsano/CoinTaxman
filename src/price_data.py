@@ -30,13 +30,7 @@ import log_config
 import misc
 import transaction
 from core import kraken_pair_map
-from database import (
-    get_db_path,
-    get_price_db,
-    get_tablename,
-    mean_price_db,
-    set_price_db,
-)
+from database import get_price_db, get_tablenames_from_db, mean_price_db, set_price_db
 
 log = log_config.getLogger(__name__)
 
@@ -48,11 +42,8 @@ log = log_config.getLogger(__name__)
 
 
 class PriceData:
-    def get_db_path(self, platform: str) -> Path:
-        return Path(config.DATA_PATH, f"{platform}.db")
-
-    def get_tablename(self, coin: str, reference_coin: str) -> str:
-        return f"{coin}/{reference_coin}"
+    # list of Kraken pairs that returned invalid arguments error
+    kraken_invalid_pairs: list[str] = []
 
     @misc.delayed
     def _get_price_binance(
@@ -153,6 +144,18 @@ class PriceData:
         return average_price
 
     @misc.delayed
+    def _get_price_coinbase(
+        self,
+        base_asset: str,
+        utc_time: datetime.datetime,
+        quote_asset: str,
+        minutes_step: int = 5,
+    ) -> decimal.Decimal:
+        return self._get_price_coinbase_pro(
+            base_asset, utc_time, quote_asset, minutes_step
+        )
+
+    @misc.delayed
     def _get_price_coinbase_pro(
         self,
         base_asset: str,
@@ -192,7 +195,6 @@ class PriceData:
             params = f"start={start}&end={end}&granularity=60"
             url = f"{root_url}/products/{pair}/candles?{params}"
 
-            log.debug("Calling %s", url)
             log.debug(
                 f"Querying Coinbase Pro candles for {pair} at {utc_time} "
                 f"(offset={minutes_offset}m): Calling %s",
@@ -363,10 +365,12 @@ class PriceData:
         For this we fetch one chunk of the trade history, starting
         `minutes_step`minutes before this timestamp.
         We then walk through the history until the closest timestamp match is
-        found. Otherwise, we start another 10 minutes earlier and try again.
+        found. Otherwise (if all received price data points are newer than the desired
+        timestamp), we start another 10 minutes earlier and try again.
         (Exiting with a warning and zero price after hitting the arbitrarily
         chosen offset limit of 120 minutes). If the initial offset is already
-        too large, recursively retry by reducing the offset step,
+        too large (i.e. all received price data points are older than the desired
+        timestamp), recursively retry by reducing the offset step,
         down to 1 minute.
 
         Documentation: https://www.kraken.com/features/api
@@ -384,8 +388,7 @@ class PriceData:
         """
         target_timestamp = misc.to_ms_timestamp(utc_time)
         root_url = "https://api.kraken.com/0/public/Trades"
-        pair = base_asset + quote_asset
-        pair = kraken_pair_map.get(pair, pair)
+        inverse = False
 
         minutes_offset = 0
         while minutes_offset < 120:
@@ -394,10 +397,28 @@ class PriceData:
             since = misc.to_ns_timestamp(
                 utc_time - datetime.timedelta(minutes=minutes_offset)
             )
-            url = f"{root_url}?{pair=:}&{since=:}"
 
             num_retries = 10
             while num_retries:
+                pair = base_asset + quote_asset
+                pair = kraken_pair_map.get(pair, pair)
+
+                # if the pair is invalid, invert it
+                if pair in self.kraken_invalid_pairs:
+                    inverse = not inverse
+                    base_asset, quote_asset = quote_asset, base_asset
+                    pair = base_asset + quote_asset
+                    pair = kraken_pair_map.get(pair, pair)
+                    # if inverted pair is also invalid, throw error
+                    if pair in self.kraken_invalid_pairs:
+                        log.error(
+                            f"Could not retrieve trades for {pair} or inverse pair, "
+                            "invalid arguments error. Please create an Issue or PR."
+                        )
+                        raise RuntimeError
+
+                url = f"{root_url}?{pair=:}&{since=:}"
+
                 log.debug(
                     f"Querying trades for {pair} at {utc_time} "
                     f"(offset={minutes_offset}m): Calling %s",
@@ -409,22 +430,29 @@ class PriceData:
 
                 if not data["error"]:
                     break
+                elif data["error"] == ["EGeneral:Invalid arguments"]:
+                    # add pair to invalid pairs list
+                    # leads to inversion of pair next time
+                    log.warning(
+                        f"Invalid arguments error for {pair} at {utc_time} "
+                        f"(offset={minutes_offset}m): "
+                        f"Blocking pair and trying inverse coin pair ..."
+                    )
+                    self.kraken_invalid_pairs.append(pair)
                 else:
                     num_retries -= 1
                     sleep_duration = 2 ** (10 - num_retries)
                     log.warning(
-                        f"Querying trades for {pair} at {utc_time} "
-                        f"(offset={minutes_offset}m): "
-                        f"Could not retrieve trades: {data['error']}. "
+                        f"Could not retrieve trades for {pair} at {utc_time} "
+                        f"(offset={minutes_offset}m): {data['error']}. "
                         f"Retry in {sleep_duration} s ..."
                     )
                     time.sleep(sleep_duration)
                     continue
             else:
                 log.error(
-                    f"Querying trades for {pair} at {utc_time} "
-                    f"(offset={minutes_offset}m): "
-                    f"Could not retrieve trades: {data['error']}"
+                    f"Could not retrieve trades for {pair} at {utc_time} "
+                    f"(offset={minutes_offset}m): {data['error']}. "
                 )
                 raise RuntimeError("Kraken response keeps having error flags.")
 
@@ -436,14 +464,34 @@ class PriceData:
             )
 
             # The desired timestamp is in the past; increase the offset
+            # desired timestamp is smaller than all timestamps of the received data
             if closest_match_index == -1:
                 continue
 
             # The desired timestamp is in the future
+            # desired timestamp is larger than all timestamps of the received data
             if closest_match_index == len(data_timestamps_ms) - 1:
-
-                if minutes_step == 1:
-                    # Cannot remove interval any further; give up
+                if len(data_timestamps_ms) < 100:
+                    # The API returns the last 1000 trades. If less than 100 trades are
+                    # received, it can be assumed that we've received the last trade.
+                    price_timestamp = data_timestamps_ms[closest_match_index]
+                    log.debug(
+                        "Accepting price from "
+                        f"{datetime.datetime.fromtimestamp(price_timestamp/1000.0)} "
+                        f"as latest price for {pair} at {utc_time}"
+                    )
+                    # This should normally only happen for virtual sells, therefore
+                    # raise a warning if the target timestamp is older than one hour
+                    now_timestamp = misc.to_ms_timestamp(
+                        datetime.datetime.now().astimezone()
+                    )
+                    if target_timestamp < now_timestamp - 3600 * 1000:
+                        log.warning(
+                            f"Timestamp for {pair} at {utc_time} is older than one "
+                            "hour, still accepted latest received trading price"
+                        )
+                elif minutes_step == 1:
+                    # Cannot reduce interval any further; give up
                     break
                 else:
                     # We missed the desired timestamp because our initial step
@@ -456,11 +504,12 @@ class PriceData:
                     )
 
             price = misc.force_decimal(data[closest_match_index][0])
+            if inverse:
+                price = misc.reciprocal(price)
             return price
 
         log.warning(
-            f"Querying trades for {pair} at {utc_time}: "
-            f"Failed to find matching exchange rate. "
+            f"Failed to find matching exchange rate for {pair} at {utc_time}: "
             "Please create an Issue or PR."
         )
         return decimal.Decimal()
@@ -491,11 +540,8 @@ class PriceData:
         if coin == reference_coin:
             return decimal.Decimal("1")
 
-        db_path = get_db_path(platform)
-        tablename = get_tablename(coin, reference_coin)
-
         # Check if price exists already in our database.
-        if (price := get_price_db(db_path, tablename, utc_time)) is None:
+        if (price := get_price_db(platform, coin, reference_coin, utc_time)) is None:
             # Price doesn't exists. Fetch price from platform.
             try:
                 get_price = getattr(self, f"_get_price_{platform}")
@@ -504,15 +550,13 @@ class PriceData:
 
             price = get_price(coin, utc_time, reference_coin, **kwargs)
             assert isinstance(price, decimal.Decimal)
-            set_price_db(
-                platform, coin, reference_coin, utc_time, price, db_path=db_path
-            )
+            set_price_db(platform, coin, reference_coin, utc_time, price)
 
         if config.MEAN_MISSING_PRICES and price <= 0.0:
             # The price is missing. Check for prices before and after the
             # transaction and estimate the price.
             # Do not save price in database.
-            price = mean_price_db(db_path, tablename, utc_time)
+            price = mean_price_db(platform, coin, reference_coin, utc_time)
 
         return price
 
@@ -547,9 +591,8 @@ class PriceData:
                         )
 
                 with sqlite3.connect(db_path) as conn:
-                    query = "SELECT name FROM sqlite_master WHERE type='table'"
-                    cur = conn.execute(query)
-                    tablenames = (result[0] for result in cur.fetchall())
+                    cur = conn.cursor()
+                    tablenames = get_tablenames_from_db(cur)
                     for tablename in tablenames:
                         base_asset, quote_asset = tablename.split("/")
                         query = f"SELECT utc_time FROM `{tablename}` WHERE price<=0.0;"

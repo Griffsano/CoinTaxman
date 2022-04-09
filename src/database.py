@@ -49,7 +49,7 @@ def get_version(db_path: Path) -> int:
             )
 
 
-def get_price_db(
+def __get_price_db(
     db_path: Path,
     tablename: str,
     utc_time: datetime.datetime,
@@ -77,12 +77,50 @@ def get_price_db(
                 raise e
 
             if prices := cur.fetchone():
-                return misc.force_decimal(prices[0])
+                price = misc.force_decimal(prices[0])
+                return price
 
     return None
 
 
-def mean_price_db(
+def get_price_db(
+    platform: str,
+    coin: str,
+    reference_coin: str,
+    utc_time: datetime.datetime,
+    db_path: Optional[Path] = None,
+) -> Optional[decimal.Decimal]:
+    """Try to retrieve the price from our local database.
+
+    Args:
+        platform (str)
+        coin (str)
+        reference_coin (str)
+        utc_time (datetime.datetime)
+        db_path (Optional[Path]): Defaults to None.
+
+    Returns:
+        Optional[decimal.Decimal]: Price.
+    """
+    tablename, inverted = get_sorted_tablename(coin, reference_coin)
+    db_path = get_db_path(platform, db_path)
+
+    price = __get_price_db(db_path, tablename, utc_time)
+
+    if price is None:
+        return None
+
+    if not price and config.REFETCH_MISSING_PRICES:
+        # Return None instead of price=0, so that our tool refetches the price.
+        return None
+
+    if inverted:
+        price = misc.reciprocal(price)
+
+    return price
+
+
+def __mean_price_db(
     db_path: Path,
     tablename: str,
     utc_time: datetime.datetime,
@@ -149,6 +187,39 @@ def mean_price_db(
                 return price
 
     return decimal.Decimal()
+
+
+def mean_price_db(
+    platform: str,
+    coin: str,
+    reference_coin: str,
+    utc_time: datetime.datetime,
+    db_path: Optional[Path] = None,
+) -> decimal.Decimal:
+    """Try to retrieve the price right before and after `utc_time`
+    from our local database.
+
+    Return 0 if the price could not be estimated.
+    The function does not check, if a price for `utc_time` exists.
+
+    Args:
+        platform (str)
+        coin (str)
+        reference_coin (str)
+        utc_time (datetime.datetime)
+        db_path (Optional[Path]): Defaults to None.
+
+    Returns:
+        decimal.Decimal: Price
+    """
+    tablename, inverted = get_sorted_tablename(coin, reference_coin)
+    db_path = get_db_path(platform, db_path)
+
+    if price := __mean_price_db(db_path, tablename, utc_time):
+        if inverted:
+            price = misc.reciprocal(price)
+
+    return price
 
 
 def __delete_price_db(
@@ -232,42 +303,59 @@ def set_price_db(
         reference_coin (str)
         utc_time (datetime.datetime)
         price (decimal.Decimal)
+        db_path (Optional[Path]): Defaults to None.
+        overwrite (bool): Default to False.
     """
     assert coin != reference_coin
 
-    coin_a, coin_b, inverted = _sort_pair(coin, reference_coin)
-    tablename = get_tablename(coin_a, coin_b)
+    tablename, inverted = get_sorted_tablename(coin, reference_coin)
+    db_path = get_db_path(platform, db_path)
 
     if inverted:
         price = misc.reciprocal(price)
 
-    if db_path is None and platform:
-        db_path = get_db_path(platform)
-
-    assert isinstance(db_path, Path), "no db path given"
-
     try:
         __set_price_db(db_path, tablename, utc_time, price)
     except sqlite3.IntegrityError as e:
-        if str(e) == f"UNIQUE constraint failed: {tablename}.utc_time":
+        if f"UNIQUE constraint failed: {tablename}.utc_time" in str(e):
             # Trying to add an already existing price in db.
-            if overwrite:
-                # Overwrite price.
-                log.debug(
-                    "Overwriting price information for "
-                    f"{platform=}, {tablename=} at {utc_time=}"
-                )
-                __delete_price_db(db_path, tablename, utc_time)
-                __set_price_db(db_path, tablename, utc_time, price)
+            # Check price from db and issue warning, if prices do not match.
+            price_db = __get_price_db(db_path, tablename, utc_time)
+
+            assert isinstance(price_db, decimal.Decimal)
+            assert isinstance(price, decimal.Decimal)
+
+            # Always overwrite missing prices in database.
+            if price_db == 0:
+                overwrite = True
+
+            # Calculate the relative error between new price and price in database.
+            if price == price_db:
+                rel_error = decimal.Decimal(0)
+            elif price == 0:
+                rel_error = decimal.Decimal(1)
             else:
-                # Check price from db and issue warning, if prices do not match.
-                price_db = get_price_db(db_path, tablename, utc_time)
-                if price != price_db:
+                rel_error = abs(price - price_db) / price
+
+            if abs(rel_error) > decimal.Decimal("1E-16"):
+                log.debug(
+                    f"Tried to write {tablename} price to database, but a "
+                    f"different price exists already ({platform} @ {utc_time})"
+                )
+                if overwrite:
+                    # Overwrite price.
+                    log.info(
+                        f"Relative error: %.6f %%, using new price: {price}, "
+                        f"overwriting database price: {price_db}",
+                        rel_error * 100,
+                    )
+                    __delete_price_db(db_path, tablename, utc_time)
+                    __set_price_db(db_path, tablename, utc_time, price)
+                else:
                     log.warning(
-                        "Tried to write price to database, "
-                        "but a different price exists already: "
-                        f"{platform=}, {tablename=}, {utc_time=}, "
-                        f"{price=} != {price_db=}"
+                        f"Relative error: %.6f %%, discarding new price: {price}, "
+                        f"using database price: {price_db}",
+                        rel_error * 100,
                     )
         else:
             raise e
@@ -292,18 +380,29 @@ def _sort_pair(coin: str, reference_coin: str) -> Tuple[str, str, bool]:
     return coin_a, coin_b, inverted
 
 
-def get_tablename(coin: str, reference_coin: str) -> str:
-    return f"{coin}/{reference_coin}"
+def get_sorted_tablename(coin: str, reference_coin: str) -> tuple[str, bool]:
+    coin_a, coin_b, inverted = _sort_pair(coin, reference_coin)
+    tablename = f"{coin_a}/{coin_b}"
+    return tablename, inverted
 
 
-def get_tablenames_from_db(cur: sqlite3.Cursor) -> list[str]:
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+def get_tablenames_from_db(
+    cur: sqlite3.Cursor, ignore_version_table: bool = True
+) -> list[str]:
+    query = "SELECT name FROM sqlite_master WHERE type='table'"
+    if ignore_version_table:
+        query += " AND name != '§version'"
+    cur.execute(f"{query};")
     tablenames = [result[0] for result in cur.fetchall()]
     return tablenames
 
 
-def get_db_path(platform: str) -> Path:
-    return Path(config.DATA_PATH, f"{platform}.db")
+def get_db_path(platform: str, db_path: Optional[Path] = None) -> Path:
+    if db_path is None and platform:
+        db_path = Path(config.DATA_PATH, f"{platform}.db")
+
+    assert isinstance(db_path, Path), "DB path is no valid path"
+    return db_path
 
 
 def check_database_or_create(platform: str) -> None:
