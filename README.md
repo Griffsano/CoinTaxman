@@ -273,8 +273,11 @@ Zusammenfassung der Besteuerung des Margin-Tradings in meinen Worten:
 - Gewinne/Verluste werden besteuert, sobald die Margin-Positionen ausgeglichen bzw. geschlossen werden
 - Wird eine Margin-Position ausgeglichen ("settled"), d.h. die Kryptowährung wird zu Vertragsende zum Startpreis ge-/verkauft, liegt ein privates Veräußerungsgeschäft vor
   - Für private Veräußerungsgeschäfte gelten die oben angeführten Regeln, inklusive der einjährigen Haltefrist
-- Wird eine Margin-Position geschlossen ("closed", Differenzausgleich), liegt ein Termingeschäft vor und die Gewinne bzw. Verluste fallen unter Kapitaleinkünfte (§ 20 EStG)
+- Wird eine Margin-Position geschlossen ("closed", Differenzausgleich), liegt ein Termingeschäft vor
+  - Die Gewinne bzw. Verluste fallen unter Kapitaleinkünfte (§ 20 EStG)
   - Erhaltene Kryptowährung aus Differenzausgleichen kann steuerfrei veräußert werden
   - Es gibt keine einjährige Haltefrist
   - Gebühren können nur abgezogen werden, wenn der Freibetrag von 801 / 1602 Euro bereits ausgeschöpft wird
   - Die Verlustrechnung ist auf 20.000 Euro jährlich begrenzt und darf nicht mit Gewinnen aus privaten Veräußerungsgeschäften verrechnet werden
+- Steht es dem Investor bis zum Ende offen, ob eine Margin-Position ausgeglichen ("settled") oder geschlossen ("closed") werden kann, liegt automatisch ein Termingeschäft vor und es gelten die gleichen Regelungen wie für geschlossene Positionen. Dies trifft für folgende Börsen zu:
+  - Kraken
