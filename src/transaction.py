@@ -99,11 +99,23 @@ class Sell(Transaction):
     pass
 
 
+class MarginFee(Transaction):
+    pass
+
+
 class MarginBuy(Transaction):
     pass
 
 
 class MarginSell(Transaction):
+    pass
+
+
+class MarginGain(Transaction):
+    pass
+
+
+class MarginLoss(Transaction):
     pass
 
 
